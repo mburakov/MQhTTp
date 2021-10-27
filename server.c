@@ -62,7 +62,7 @@ static in_port_t GetPort() {
   const char* http_port = getenv("HTTP_PORT");
   if (!http_port) return kDefaultPort;
   int port = atoi(http_port);
-  if (0 < port && port < 65536) {
+  if (0 >= port || port >= 65536) {
     Log("Invalid http port value \"%s\", using %u", http_port, kDefaultPort);
     return kDefaultPort;
   }
