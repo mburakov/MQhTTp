@@ -56,14 +56,24 @@ static int CompareMessages(const void* a, const void* b) {
                 ((const struct Message*)b)->topic);
 }
 
-static bool Flush(int fd, const char* status, const void* body,
-                  size_t body_size) {
-  char buffer[64];
-  int length = snprintf(buffer, sizeof(buffer),
-                        "HTTP/1.1 %s\r\n"
-                        "Content-Length: %zu\r\n"
-                        "\r\n",
-                        status, body_size);
+static bool Flush(int fd, const char* status, const char* type,
+                  const void* body, size_t body_size) {
+  char buffer[256];
+  int length;
+  if (type) {
+    length = snprintf(buffer, sizeof(buffer),
+                      "HTTP/1.1 %s\r\n"
+                      "Content-Type: %s\r\n"
+                      "Content-Length: %zu\r\n"
+                      "\r\n",
+                      status, type, body_size);
+  } else {
+    length = snprintf(buffer, sizeof(buffer),
+                      "HTTP/1.1 %s\r\n"
+                      "Content-Length: %zu\r\n"
+                      "\r\n",
+                      status, body_size);
+  }
   // TODO(mburakov): Verify length is valid at this point.
   struct iovec iov[] = {{.iov_base = buffer, .iov_len = (size_t)length},
                         {.iov_base = UNCONST(body), .iov_len = body_size}};
@@ -88,43 +98,67 @@ static void CollectMatchingMessages(const void* nodep, VISIT which,
       strncmp((*it)->topic, arg->topic, arg->topic_len))
     return;
   size_t topic_len = strlen((*it)->topic);
-  size_t buffer_size = arg->buffer_size + topic_len + 1;
+  static const char kSep[] = {'<', 'b', 'r', '>'};
+  size_t buffer_size = arg->buffer_size + topic_len + sizeof(kSep);
   char* buffer = realloc(arg->buffer, buffer_size);
   if (!buffer) {
     Log("Failed to realloc buffer (%s)", strerror(errno));
     return;
   }
   memcpy(buffer + arg->buffer_size, (*it)->topic, topic_len);
-  buffer[buffer_size - 1] = '\n';
+  memcpy(buffer + arg->buffer_size + topic_len, kSep, sizeof(kSep));
   arg->buffer = buffer;
   arg->buffer_size = buffer_size;
+}
+
+static bool HandleGetRequest(struct Context* context, int fd,
+                             const char* target) {
+  if (!strcmp(target, "/favicon.ico"))
+    return Flush(fd, "404 Not Found", NULL, NULL, 0);
+  static const char kHeader[] =
+      "<!DOCTYPE html>"
+      "<html>"
+      "<head>"
+      "<title>MQhTTp</title>"
+      "</head>"
+      "<body>";
+  static const char kFooter[] =
+      "</body>"
+      "</html>";
+  struct {
+    const char* topic;
+    size_t topic_len;
+    char* buffer;
+    size_t buffer_size;
+  } arg = {.topic = target + 1,
+           .topic_len = strlen(target) - 1,
+           .buffer = strdup(kHeader),
+           .buffer_size = sizeof(kHeader) - 1};
+  twalk_r(context->messages, CollectMatchingMessages, &arg);
+  size_t buffer_size = arg.buffer_size + sizeof(kFooter) - 1;
+  char* buffer = realloc(arg.buffer, buffer_size);
+  memcpy(buffer + arg.buffer_size, kFooter, sizeof(kFooter) - 1);
+  bool result =
+      Flush(fd, "200 OK", "text/html; charset=utf-8", buffer, buffer_size);
+  free(arg.buffer);
+  return result;
 }
 
 static bool HandleRequest(void* user, int fd, const char* method,
                           const char* target, const void* body,
                           size_t body_size) {
   struct Context* context = user;
-  if (!strcmp(method, "GET")) {
-    struct {
-      const char* topic;
-      size_t topic_len;
-      char* buffer;
-      size_t buffer_size;
-    } arg = {.topic = target + 1,
-             .topic_len = strlen(target) - 1,
-             .buffer = NULL,
-             .buffer_size = 0};
-    twalk_r(context->messages, CollectMatchingMessages, &arg);
-    return Flush(fd, "200 OK", arg.buffer, arg.buffer_size);
-  }
+  if (!strcmp(method, "GET")) return HandleGetRequest(context, fd, target);
   if (strcmp(method, "POST"))
-    return Flush(fd, "405 Method Not Allowed", NULL, 0);
-  if (!body_size || !target[1]) return Flush(fd, "400 Bad Request", NULL, 0);
+    return Flush(fd, "405 Method Not Allowed", NULL, NULL, 0);
+  if (!body_size || !target[1])
+    return Flush(fd, "400 Bad Request", NULL, NULL, 0);
   int mosq_errno = mosquitto_publish(context->mosq, NULL, target + 1,
                                      (int)body_size, body, 0, false);
-  if (mosq_errno == MOSQ_ERR_SUCCESS) return Flush(fd, "200 OK", NULL, 0);
+  if (mosq_errno == MOSQ_ERR_SUCCESS) return Flush(fd, "200 OK", NULL, NULL, 0);
   const char* error = mosquitto_strerror(mosq_errno);
-  return Flush(fd, "500 Internal Server Error", error, strlen(error));
+  return Flush(fd, "500 Internal Server Error", "text/plain; charset=utf-8",
+               error, strlen(error));
 }
 
 static void StoreMessagePayload(void** messages,
