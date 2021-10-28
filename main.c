@@ -42,6 +42,9 @@ struct Message {
 struct Context {
   struct mosquitto* mosq;
   void* messages;
+  char* buffer;
+  size_t size;
+  size_t alloc;
 };
 
 static volatile sig_atomic_t g_shutdown;
@@ -54,6 +57,12 @@ static void OnSignal(int num) {
 static int CompareMessages(const void* a, const void* b) {
   return strcmp(((const struct Message*)a)->topic,
                 ((const struct Message*)b)->topic);
+}
+
+static void FreeMessage(void* nodep) {
+  struct Message* message = nodep;
+  free(message->topic);
+  free(message->payload);
 }
 
 static bool Flush(int fd, const char* status, const char* type,
@@ -85,36 +94,54 @@ static bool Flush(int fd, const char* status, const char* type,
   return true;
 }
 
+static bool BufferAppend(struct Context* context, const char* data,
+                         size_t size) {
+  size_t alloc = context->size + size;
+  if (context->alloc < alloc) {
+    char* buffer = realloc(context->buffer, alloc);
+    if (!buffer) {
+      Log("Failed to reallocate buffer (%s)", strerror(errno));
+      return false;
+    }
+    context->buffer = buffer;
+    context->alloc = alloc;
+  }
+  memcpy(context->buffer + context->size, data, size);
+  context->size += size;
+  return true;
+}
+
 static void CollectMatchingMessages(const void* nodep, VISIT which,
                                     void* closure) {
   struct {
+    struct Context* context;
     const char* topic;
     size_t topic_len;
-    char* buffer;
-    size_t buffer_size;
   }* arg = closure;
   const struct Message* const* it = nodep;
   if (which == preorder || which == endorder ||
       strncmp((*it)->topic, arg->topic, arg->topic_len))
     return;
-  size_t topic_len = strlen((*it)->topic);
-  static const char kSep[] = {'<', 'b', 'r', '>'};
-  size_t buffer_size = arg->buffer_size + topic_len + sizeof(kSep);
-  char* buffer = realloc(arg->buffer, buffer_size);
-  if (!buffer) {
-    Log("Failed to realloc buffer (%s)", strerror(errno));
-    return;
-  }
-  memcpy(buffer + arg->buffer_size, (*it)->topic, topic_len);
-  memcpy(buffer + arg->buffer_size + topic_len, kSep, sizeof(kSep));
-  arg->buffer = buffer;
-  arg->buffer_size = buffer_size;
+  static const char kPre[] = "<a href=\"/";
+  BufferAppend(arg->context, kPre, strlen(kPre));
+  BufferAppend(arg->context, (*it)->topic, strlen((*it)->topic));
+  static const char kInt[] = "\">/";
+  BufferAppend(arg->context, kInt, strlen(kInt));
+  BufferAppend(arg->context, (*it)->topic, strlen((*it)->topic));
+  static const char kPost[] = "<br>";
+  BufferAppend(arg->context, kPost, strlen(kPost));
 }
 
 static bool HandleGetRequest(struct Context* context, int fd,
                              const char* target) {
   if (!strcmp(target, "/favicon.ico"))
     return Flush(fd, "404 Not Found", NULL, NULL, 0);
+  struct Message pred = {.topic = UNCONST(target + 1)};
+  struct Message** it = tfind(&pred, &context->messages, CompareMessages);
+  if (it) {
+    return Flush(fd, "200 OK", "application/json", (*it)->payload,
+                 (*it)->payloadlen);
+  }
   static const char kHeader[] =
       "<!DOCTYPE html>"
       "<html>"
@@ -126,22 +153,15 @@ static bool HandleGetRequest(struct Context* context, int fd,
       "</body>"
       "</html>";
   struct {
+    struct Context* context;
     const char* topic;
     size_t topic_len;
-    char* buffer;
-    size_t buffer_size;
-  } arg = {.topic = target + 1,
-           .topic_len = strlen(target) - 1,
-           .buffer = strdup(kHeader),
-           .buffer_size = sizeof(kHeader) - 1};
+  } arg = {context, target + 1, strlen(target) - 1};
+  context->size = 0;
+  if (!BufferAppend(context, kHeader, sizeof(kHeader) - 1)) return false;
   twalk_r(context->messages, CollectMatchingMessages, &arg);
-  size_t buffer_size = arg.buffer_size + sizeof(kFooter) - 1;
-  char* buffer = realloc(arg.buffer, buffer_size);
-  memcpy(buffer + arg.buffer_size, kFooter, sizeof(kFooter) - 1);
-  bool result =
-      Flush(fd, "200 OK", "text/html; charset=utf-8", buffer, buffer_size);
-  free(arg.buffer);
-  return result;
+  if (!BufferAppend(context, kFooter, sizeof(kFooter) - 1)) return false;
+  return Flush(fd, "200 OK", "text/html", context->buffer, context->size);
 }
 
 static bool HandleRequest(void* user, int fd, const char* method,
@@ -157,8 +177,8 @@ static bool HandleRequest(void* user, int fd, const char* method,
                                      (int)body_size, body, 0, false);
   if (mosq_errno == MOSQ_ERR_SUCCESS) return Flush(fd, "200 OK", NULL, NULL, 0);
   const char* error = mosquitto_strerror(mosq_errno);
-  return Flush(fd, "500 Internal Server Error", "text/plain; charset=utf-8",
-               error, strlen(error));
+  return Flush(fd, "500 Internal Server Error", "text/plain", error,
+               strlen(error));
 }
 
 static void StoreMessagePayload(void** messages,
@@ -225,7 +245,8 @@ int main(int argc, char* argv[]) {
   int epfd = epoll_create(1);
   if (epfd == -1) Terminate("Failed to create epoll (%s)", strerror(errno));
   int result = EXIT_FAILURE;
-  struct Context context = {.mosq = NULL, .messages = NULL};
+  struct Context context;
+  memset(&context, 0, sizeof(struct Context));
   struct Server* server = ServerCreate(epfd, HandleRequest, &context);
   if (!server) {
     Log("Failed to create server");
@@ -305,6 +326,8 @@ rollback_mosquitto_lib_init:
 rollback_server_create:
   ServerDestroy(server);
 rollback_epoll_create:
+  tdestroy(context.messages, FreeMessage);
+  free(context.buffer);
   close(epfd);
   return result;
 }
