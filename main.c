@@ -15,8 +15,10 @@
  * along with MQhTTp.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <dirent.h>
 #include <errno.h>
-#include <luajit.h>
+#include <lauxlib.h>
+#include <lualib.h>
 #include <mosquitto.h>
 #include <search.h>
 #include <signal.h>
@@ -237,6 +239,23 @@ static void HandleMosquitto(struct mosquitto* mosq, void* user,
   StoreMessagePayload(&context->messages, message);
 }
 
+static void SourceCurrentDir(lua_State* lua_state) {
+  DIR* current_dir = opendir(".");
+  if (!current_dir) Terminate("Failed to open current dir");
+  for (struct dirent* item; (item = readdir(current_dir));) {
+    if (item->d_type != DT_REG) continue;
+    size_t length = strlen(item->d_name);
+    static const char kLuaExt[] = {'.', 'l', 'u', 'a'};
+    if (length < sizeof(kLuaExt)) continue;
+    const char* ext = item->d_name + length - sizeof(kLuaExt);
+    if (memcmp(ext, kLuaExt, sizeof(kLuaExt))) continue;
+    Log("Sourcing %s...", item->d_name);
+    if (luaL_dofile(lua_state, item->d_name))
+      Log("%s", lua_tostring(lua_state, -1));
+  }
+  closedir(current_dir);
+}
+
 int main(int argc, char* argv[]) {
   if (argc < 3) Terminate("Usage: %s <host> <port>", argv[0]);
   int port = atoi(argv[2]);
@@ -284,22 +303,29 @@ int main(int argc, char* argv[]) {
     Log("Failed to add mosquitto to epoll (%s)", strerror(errno));
     goto rollback_mosquitto_connect;
   }
+  lua_State* lua_state = luaL_newstate();
+  if (!lua_state) {
+    Log("Failed to create lua state");
+    goto rollback_mosquitto_connect;
+  }
+  luaL_openlibs(lua_state);
+  SourceCurrentDir(lua_state);
   static const struct sigaction sa = {.sa_handler = OnSignal};
   if (sigaction(SIGINT, &sa, NULL) || sigaction(SIGTERM, &sa, NULL)) {
     Log("Failed to set up signal handlers (%s)", strerror(errno));
-    goto rollback_mosquitto_connect;
+    goto rollback_lual_newstate;
   }
   while (!g_shutdown) {
     switch (epoll_wait(epfd, &ev, 1, 1000)) {
       case -1:
         Log("Failed to wait epoll (%s)", strerror(errno));
-        if (errno != EINTR) goto rollback_mosquitto_connect;
+        if (errno != EINTR) goto rollback_lual_newstate;
         continue;
       case 0:
         mosq_errno = mosquitto_loop_misc(context.mosq);
         if (mosq_errno != MOSQ_ERR_SUCCESS) {
           Log("Failed to loop mosquitto (%s)", mosquitto_strerror(mosq_errno));
-          goto rollback_mosquitto_connect;
+          goto rollback_lual_newstate;
         }
         continue;
       default:
@@ -309,7 +335,7 @@ int main(int argc, char* argv[]) {
       mosq_errno = mosquitto_loop_read(context.mosq, 1);
       if (mosq_errno != MOSQ_ERR_SUCCESS) {
         Log("Failed to read mosquitto (%s)", mosquitto_strerror(mosq_errno));
-        goto rollback_mosquitto_connect;
+        goto rollback_lual_newstate;
       }
       continue;
     }
@@ -317,6 +343,8 @@ int main(int argc, char* argv[]) {
       Terminate("Stray socket in epoll");
   }
   result = EXIT_SUCCESS;
+rollback_lual_newstate:
+  lua_close(lua_state);
 rollback_mosquitto_connect:
   mosquitto_disconnect(context.mosq);
 rollback_mosquitto_new:
