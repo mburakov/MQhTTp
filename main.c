@@ -37,7 +37,7 @@
 struct Message {
   char* topic;
   void* payload;
-  size_t payloadlen;
+  size_t payload_size;
   void* handler;
 };
 
@@ -142,7 +142,7 @@ static bool HandleGetRequest(struct Context* context, int fd,
   struct Message** it = tfind(&pred, &context->messages, CompareMessages);
   if (it) {
     return Flush(fd, "200 OK", "application/json", (*it)->payload,
-                 (*it)->payloadlen);
+                 (*it)->payload_size);
   }
   static const char kHeader[] =
       "<!DOCTYPE html>"
@@ -183,60 +183,59 @@ static bool HandleRequest(void* user, int fd, const char* method,
                strlen(error));
 }
 
-static void StoreMessagePayload(void** messages,
-                                const struct mosquitto_message* message) {
-  struct Message pred = {.topic = message->topic};
+static struct Message* GetMessage(void** messages, const char* topic) {
+  struct Message pred = {.topic = UNCONST(topic)};
   struct Message** it = tsearch(&pred, messages, CompareMessages);
   if (!it) {
     Log("Failed to add message to the map");
-    return;
+    return NULL;
   }
-  if (*it != &pred) {
-    size_t payloadlen = (size_t)message->payloadlen;
-    void* buffer = malloc(payloadlen);
-    if (!buffer) {
-      Log("Failed to copy payload (%s)", strerror(errno));
-      return;
-    }
-    memcpy(buffer, message->payload, payloadlen);
-    free((*it)->payload);
-    (*it)->payload = buffer;
-    (*it)->payloadlen = payloadlen;
-    return;
-  }
-  struct Message* added = calloc(1, sizeof(struct Message));
-  if (!added) {
+  if (*it != &pred) return *it;
+  struct Message* message = calloc(1, sizeof(struct Message));
+  if (!message) {
     Log("Failed to allocate new message (%s)", strerror(errno));
     goto rollback_tsearch;
   }
-  added->topic = strdup(message->topic);
-  if (!added->topic) {
+  message->topic = strdup(topic);
+  if (!message->topic) {
     Log("Failed to copy topic (%s)", strerror(errno));
     goto rollback_calloc;
   }
-  size_t payloadlen = (size_t)message->payloadlen;
-  added->payload = malloc(payloadlen);
-  if (!added->payload) {
-    Log("Failed to copy payload (%s)", strerror(errno));
-    goto rollback_strdup;
-  }
-  memcpy(added->payload, message->payload, payloadlen);
-  added->payloadlen = payloadlen;
-  *it = added;
-  return;
-rollback_strdup:
-  free(added->topic);
+  *it = message;
+  return message;
 rollback_calloc:
-  free(added);
+  free(message);
 rollback_tsearch:
   tdelete(&pred, messages, CompareMessages);
+  return NULL;
+}
+
+static void StoreMessagePayload(void** messages, const char* topic,
+                                const void* payload, size_t payload_size) {
+  struct Message* message = GetMessage(messages, topic);
+  if (!message) {
+    Log("Failed to get message");
+    return;
+  }
+  void* buffer = malloc(payload_size);
+  if (!buffer) {
+    Log("Failed to copy payload (%s)", strerror(errno));
+    return;
+  }
+  memcpy(buffer, payload, payload_size);
+  free(message->payload);
+  message->payload = buffer;
+  message->payload_size = payload_size;
+  return;
 }
 
 static void HandleMosquitto(struct mosquitto* mosq, void* user,
                             const struct mosquitto_message* message) {
   (void)mosq;
   struct Context* context = user;
-  StoreMessagePayload(&context->messages, message);
+  // TODO(mburakov): Call registered lua callback if any.
+  StoreMessagePayload(&context->messages, message->topic, message->payload,
+                      (size_t)message->payloadlen);
 }
 
 static void SourceCurrentDir(lua_State* lua_state) {
