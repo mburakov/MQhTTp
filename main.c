@@ -255,6 +255,25 @@ static void SourceCurrentDir(lua_State* lua_state) {
   closedir(current_dir);
 }
 
+static int LuaSubscribe(lua_State* lua_state) {
+  // TODO(mburakov): Handle lua errors.
+  struct Context* context = lua_touserdata(lua_state, lua_upvalueindex(1));
+  return 0;
+}
+
+static int LuaPublish(lua_State* lua_state) {
+  // TODO(mburakov): Handle lua errors.
+  struct Context* context = lua_touserdata(lua_state, lua_upvalueindex(1));
+  size_t payload_size;
+  const char* topic = lua_tolstring(lua_state, -2, NULL);
+  const char* payload = lua_tolstring(lua_state, -1, &payload_size);
+  int mosq_errno = mosquitto_publish(context->mosq, NULL, topic,
+                                     (int)payload_size, payload, 0, false);
+  if (mosq_errno != MOSQ_ERR_SUCCESS)
+    Log("Failed to publish to mosquitto (%s)", mosquitto_strerror(mosq_errno));
+  return 0;
+}
+
 int main(int argc, char* argv[]) {
   if (argc < 3) Terminate("Usage: %s <host> <port>", argv[0]);
   int port = atoi(argv[2]);
@@ -308,6 +327,13 @@ int main(int argc, char* argv[]) {
     goto rollback_mosquitto_connect;
   }
   luaL_openlibs(lua_state);
+  // TODO(mburakov): Handle lua errors.
+  lua_pushlightuserdata(lua_state, &context);
+  lua_pushcclosure(lua_state, LuaSubscribe, 1);
+  lua_setglobal(lua_state, "subscribe");
+  lua_pushlightuserdata(lua_state, &context);
+  lua_pushcclosure(lua_state, LuaPublish, 1);
+  lua_setglobal(lua_state, "publish");
   SourceCurrentDir(lua_state);
   static const struct sigaction sa = {.sa_handler = OnSignal};
   if (sigaction(SIGINT, &sa, NULL) || sigaction(SIGTERM, &sa, NULL)) {
