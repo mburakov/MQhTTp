@@ -258,7 +258,13 @@ static void SourceCurrentDir(lua_State* lua_state) {
 
 static int LuaSubscribe(lua_State* lua_state) {
   // TODO(mburakov): Handle lua errors.
+#if 0
+  // mburakov: Userdata is broken on AArch64
   struct Context* context = lua_touserdata(lua_state, lua_upvalueindex(1));
+#else
+  const void* ctx = lua_tolstring(lua_state, lua_upvalueindex(1), NULL);
+  struct Context* context = *(void* const*)ctx;
+#endif
   const char* topic = lua_tolstring(lua_state, -2, NULL);
   struct Message* message = GetMessage(&context->messages, topic);
   if (!message) {
@@ -271,7 +277,13 @@ static int LuaSubscribe(lua_State* lua_state) {
 
 static int LuaPublish(lua_State* lua_state) {
   // TODO(mburakov): Handle lua errors.
+#if 0
+  // mburakov: Userdata is broken on AArch64
   struct Context* context = lua_touserdata(lua_state, lua_upvalueindex(1));
+#else
+  const void* ctx = lua_tolstring(lua_state, lua_upvalueindex(1), NULL);
+  struct Context* context = *(void* const*)ctx;
+#endif
   char* buffer = context->buffer;
   size_t topic_size, payload_size;
   const char* topic = lua_tolstring(lua_state, -2, &topic_size);
@@ -340,10 +352,21 @@ int main(int argc, char* argv[]) {
   }
   luaL_openlibs(context.lua_state);
   // TODO(mburakov): Handle lua errors.
+#if 0
+  // mburakov: Userdata is broken on AArch64
   lua_pushlightuserdata(context.lua_state, &context);
+#else
+  void* ctx = &context;
+  lua_pushlstring(context.lua_state, (const char*)&ctx, sizeof(void*));
+#endif
   lua_pushcclosure(context.lua_state, LuaSubscribe, 1);
   lua_setglobal(context.lua_state, "subscribe");
+#if 0
+  // mburakov: Userdata is broken on AArch64
   lua_pushlightuserdata(context.lua_state, &context);
+#else
+  lua_pushlstring(context.lua_state, (const char*)&ctx, sizeof(void*));
+#endif
   lua_pushcclosure(context.lua_state, LuaPublish, 1);
   lua_setglobal(context.lua_state, "publish");
   SourceCurrentDir(context.lua_state);
