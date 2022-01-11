@@ -2,7 +2,7 @@ bin:=$(notdir $(shell pwd))
 src:=$(shell ls *.c)
 obj:=$(src:.c=.o)
 
-libs:=luajit
+libs?=luajit
 
 CFLAGS?=\
 	-march=native -O3 -flto \
