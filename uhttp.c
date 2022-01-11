@@ -167,7 +167,7 @@ static _Bool UhttpOnFieldValue(struct Uhttp* uhttp, char* glyph) {
 
 static _Bool UhttpOnBody(struct Uhttp* uhttp, char* glyph) {
   if (!uhttp->public.body) uhttp->public.body = glyph;
-  ssize_t body_size = glyph - uhttp->public.body + 1;
+  ptrdiff_t body_size = glyph - uhttp->public.body + 1;
   if ((size_t)body_size == uhttp->public.body_size)
     uhttp->parser.state = UhttpOnStopped;
   return 1;
