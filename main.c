@@ -50,6 +50,12 @@ struct Context {
   lua_State* lua_state;
 };
 
+static struct {
+  struct Context* context;
+  const char* topic;
+  size_t topic_len;
+} g_twalk_context;
+
 static volatile sig_atomic_t g_shutdown;
 
 static void OnSignal(int num) {
@@ -114,25 +120,20 @@ static bool BufferAppend(struct Context* context, const char* data,
   return true;
 }
 
-static void CollectMatchingMessages(const void* nodep, VISIT which,
-                                    void* closure) {
-  struct {
-    struct Context* context;
-    const char* topic;
-    size_t topic_len;
-  }* arg = closure;
+static void CollectMatchingMessages(const void* nodep, VISIT which, int level) {
+  (void)level;
   const struct Message* const* it = nodep;
   if (which == preorder || which == endorder ||
-      strncmp((*it)->topic, arg->topic, arg->topic_len))
+      strncmp((*it)->topic, g_twalk_context.topic, g_twalk_context.topic_len))
     return;
   static const char kPre[] = "<a href=\"/";
-  BufferAppend(arg->context, kPre, strlen(kPre));
-  BufferAppend(arg->context, (*it)->topic, strlen((*it)->topic));
+  BufferAppend(g_twalk_context.context, kPre, strlen(kPre));
+  BufferAppend(g_twalk_context.context, (*it)->topic, strlen((*it)->topic));
   static const char kInt[] = "\">/";
-  BufferAppend(arg->context, kInt, strlen(kInt));
-  BufferAppend(arg->context, (*it)->topic, strlen((*it)->topic));
+  BufferAppend(g_twalk_context.context, kInt, strlen(kInt));
+  BufferAppend(g_twalk_context.context, (*it)->topic, strlen((*it)->topic));
   static const char kPost[] = "<br>";
-  BufferAppend(arg->context, kPost, strlen(kPost));
+  BufferAppend(g_twalk_context.context, kPost, strlen(kPost));
 }
 
 static bool HandleGetRequest(struct Context* context, int fd,
@@ -155,14 +156,12 @@ static bool HandleGetRequest(struct Context* context, int fd,
   static const char kFooter[] =
       "</body>"
       "</html>";
-  struct {
-    struct Context* context;
-    const char* topic;
-    size_t topic_len;
-  } arg = {context, target + 1, strlen(target) - 1};
   context->size = 0;
+  g_twalk_context.context = context;
+  g_twalk_context.topic = target + 1;
+  g_twalk_context.topic_len = strlen(target) - 1;
   if (!BufferAppend(context, kHeader, sizeof(kHeader) - 1)) return false;
-  twalk_r(context->messages, CollectMatchingMessages, &arg);
+  twalk(context->messages, CollectMatchingMessages);
   if (!BufferAppend(context, kFooter, sizeof(kFooter) - 1)) return false;
   return Flush(fd, "200 OK", "text/html", context->buffer, context->size);
 }
