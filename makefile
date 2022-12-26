@@ -2,16 +2,16 @@ bin:=$(notdir $(shell pwd))
 src:=$(shell ls *.c)
 obj:=$(src:.c=.o)
 
-libs?=luajit
+obj+=\
+	toolbox/buffer.o \
+	toolbox/http_parser.o \
+	toolbox/io_muxer.o \
+	toolbox/mqtt.o \
+	toolbox/mqtt_parser.o \
+	toolbox/utils.o
 
-CFLAGS?=\
-	-march=native -O3 -flto \
-	-Wall -Wextra -pedantic \
-	-D_GNU_SOURCE
-
-LDFLAGS?=\
-	-O3 -s -flto \
-	-lmosquitto
+libs:=\
+	luajit
 
 CFLAGS+=$(shell pkg-config --cflags $(libs))
 LDFLAGS+=$(shell pkg-config --libs $(libs))
