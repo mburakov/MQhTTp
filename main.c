@@ -31,16 +31,29 @@
 #include <unistd.h>
 
 #include "toolbox/buffer.h"
+#include "toolbox/http_parser.h"
 #include "toolbox/io_muxer.h"
 #include "toolbox/mqtt.h"
 #include "toolbox/mqtt_parser.h"
 #include "toolbox/utils.h"
+
+struct ClientContext {
+  int sock;
+  char* method;
+  char* target;
+  size_t content_length;
+  struct Buffer http_buffer;
+  struct HttpParserState http_parser;
+  struct ServiceContext* service;
+  struct ClientContext* next;
+};
 
 struct ServiceContext {
   int http;
   int mqtt;
   struct IoMuxer io_muxer;
   struct Buffer mqtt_buffer;
+  struct ClientContext* clients;
 };
 
 static volatile sig_atomic_t g_signal;
@@ -86,8 +99,175 @@ static struct sockaddr_in GetMqttAddr(int argc, char* argv[]) {
   return result;
 }
 
+static void DropClientContext(struct ClientContext* client) {
+  struct ClientContext** next = &client->service->clients;
+  while (*next != client) next = &(*next)->next;
+  *next = client->next;
+
+  BufferDestroy(&client->http_buffer);
+  if (client->target) free(client->target);
+  if (client->method) free(client->method);
+  close(client->sock);
+  free(client);
+}
+
+static void OnHttpRequest(void* user, const char* method, size_t method_size,
+                          const char* target, size_t target_size) {
+  struct ClientContext* client = user;
+  client->method = malloc(method_size + 1);
+  if (!client->method) {
+    LOGW("Failed to copy http method (%s)", strerror(errno));
+    return;
+  }
+  memcpy(client->method, method, method_size);
+  client->method[method_size] = 0;
+  client->target = malloc(target_size + 1);
+  if (!client->target) {
+    LOGW("Failed to copy http target (%s)", strerror(errno));
+    return;
+  }
+  memcpy(client->target, target, target_size);
+  client->target[target_size] = 0;
+}
+
+static void OnHttpField(void* user, const char* name, size_t name_size,
+                        const char* value, size_t value_size) {
+  static const char content_length_name[] = {'C', 'o', 'n', 't', 'e', 'n', 't',
+                                             '-', 'L', 'e', 'n', 'g', 't', 'h'};
+  struct ClientContext* client = user;
+  if (name_size != sizeof(content_length_name) ||
+      memcmp(name, content_length_name, sizeof(content_length_name))) {
+    return;
+  }
+  size_t content_length = 0;
+  if (!value_size) goto bad_content_length;
+  for (size_t offset = 0; offset < value_size; offset++) {
+    if ('0' > value[offset] || value[offset] > '9') goto bad_content_length;
+    content_length = content_length * 10 + (size_t)(value[offset] - '0');
+  }
+  client->content_length = content_length;
+  return;
+
+bad_content_length:
+  LOGW("Invalid Content-Length value");
+}
+
+static void OnHttpFinished(void* user, size_t offset) {
+  struct ClientContext* client = user;
+  BufferDiscard(&client->http_buffer, offset);
+}
+
+static void OnClientRead(void* user) {
+  struct ClientContext* client = user;
+  switch (BufferAppendFrom(&client->http_buffer, client->sock)) {
+    case -1:
+      LOGW("Failed to read http client (%s)", strerror(errno));
+      __attribute__((fallthrough));
+    case 0:
+      goto drop_client;
+    default:
+      break;
+  }
+  static const struct HttpParserCallbacks http_callbacks = {
+      .on_request = OnHttpRequest,
+      .on_field = OnHttpField,
+      .on_finished = OnHttpFinished,
+  };
+  switch (HttpParserParse(&client->http_parser, client->http_buffer.data,
+                          client->http_buffer.size, &http_callbacks, user)) {
+    case kHttpParserResultFinished:
+      break;
+    case kHttpParserResultWantMore:
+      if (!IoMuxerOnRead(&client->service->io_muxer, client->sock, OnClientRead,
+                         user)) {
+        LOGW("Failed to reschedule http client read (%s)", strerror(errno));
+        goto drop_client;
+      }
+      return;
+    case kHttpParserResultError:
+      LOGW("Failed to parse http request");
+      goto drop_client;
+    default:
+      __builtin_unreachable();
+  }
+
+  HttpParserReset(&client->http_parser);
+  if (strcmp(client->method, "GET")) {
+    // TODO(mburakov): Unsupported method
+    goto drop_client;
+  }
+  if (client->content_length) {
+    // TODO(mburakov): Unsupported body
+    goto drop_client;
+  }
+
+  static const char hurr_durr[] =
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/html; charset=UTF-8\r\n"
+      "Content-Length: 51\r\n"
+      "\r\n"
+      "<!DOCTYPE html>\n<html><body>"
+      "hurr-durr"
+      "</body></html>";
+  write(client->sock, hurr_durr, sizeof(hurr_durr) - 1);
+
+  free(client->method);
+  client->method = NULL;
+  free(client->target);
+  client->target = NULL;
+  client->content_length = 0;
+
+  if (!IoMuxerOnRead(&client->service->io_muxer, client->sock, OnClientRead,
+                     user)) {
+    LOGW("Failed to reschedule http client read (%s)", strerror(errno));
+    goto drop_client;
+  }
+  return;
+
+drop_client:
+  DropClientContext(client);
+}
+
 static void OnHttpRead(void* user) {
-  // TODO(mburakov): Implement me!!!
+  struct ServiceContext* context = user;
+  int sock = accept(context->http, NULL, NULL);
+  if (sock == -1) {
+    LOGW("Failed to accept http client (%s)", strerror(errno));
+    return;
+  }
+  struct ClientContext* client = malloc(sizeof(struct ClientContext));
+  if (!client) {
+    LOGW("Failed to allocate http client context (%s)", strerror(errno));
+    goto close_sock;
+  }
+  if (!IoMuxerOnRead(&context->io_muxer, sock, OnClientRead, client)) {
+    LOGW("Failed to schedule http client read (%s)", strerror(errno));
+    goto free_client;
+  }
+
+  client->sock = sock;
+  client->method = NULL;
+  client->target = NULL;
+  client->content_length = 0;
+  BufferCreate(&client->http_buffer);
+  HttpParserReset(&client->http_parser);
+  client->service = context;
+  client->next = NULL;
+
+  struct ClientContext** next = &context->clients;
+  while (*next) next = &(*next)->next;
+  *next = client;
+
+  if (!IoMuxerOnRead(&context->io_muxer, context->http, OnHttpRead, user)) {
+    LOGE("Failed to reschedule http client accept (%s)", strerror(errno));
+    OnSignal(SIGABRT);
+  }
+  return;
+
+free_client:
+  free(client);
+close_sock:
+  close(sock);
 }
 
 static void OnMqttConnectAck(void* user, bool success) {
@@ -231,6 +411,10 @@ int main(int argc, char* argv[]) {
       LOGE("Failed to iterate iomuxer (%s)", strerror(errno));
       OnSignal(SIGABRT);
     }
+  }
+
+  while (context.clients) {
+    DropClientContext(context.clients);
   }
 
 destroy_iomuxer:
