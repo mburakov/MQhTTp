@@ -57,11 +57,19 @@ struct ServiceContext {
   struct IoMuxer io_muxer;
   struct Buffer mqtt_buffer;
   struct ClientContext* clients;
+  size_t messages_count;
   void* messages;
+};
+
+struct TwalkClosure {
+  const char* target;
+  size_t target_size;
+  struct iovec* ptr;
 };
 
 static volatile sig_atomic_t g_signal;
 static struct ServiceContext g_service;
+static struct TwalkClosure g_twalk_closure;
 
 static void OnSignal(int signal) { g_signal = signal; }
 
@@ -162,6 +170,27 @@ static void OnHttpFinished(void* user, size_t offset) {
   BufferDiscard(&client->http_buffer, offset);
 }
 
+static void GatherMessages(const void* nodep, VISIT which, int depth) {
+  (void)depth;
+  struct Message* message = *(void* const*)nodep;
+  if (which == preorder || which == endorder ||
+      message->topic_size < g_twalk_closure.target_size ||
+      memcmp(message->topic, g_twalk_closure.target,
+             g_twalk_closure.target_size)) {
+    return;
+  }
+  g_twalk_closure.ptr->iov_base = "<a href=\"/";
+  g_twalk_closure.ptr++->iov_len = 10;
+  g_twalk_closure.ptr->iov_base = message->topic;
+  g_twalk_closure.ptr++->iov_len = message->topic_size;
+  g_twalk_closure.ptr->iov_base = "\"/>/";
+  g_twalk_closure.ptr++->iov_len = 4;
+  g_twalk_closure.ptr->iov_base = message->topic;
+  g_twalk_closure.ptr++->iov_len = message->topic_size;
+  g_twalk_closure.ptr->iov_base = "</a><br>";
+  g_twalk_closure.ptr++->iov_len = 8;
+}
+
 static bool ServeHttpGet(int fd, const char* target) {
   if (!strcmp(target, "/favicon.ico"))
     return SendHttpReply(fd, "404 Not Found", NULL, NULL, 0);
@@ -170,12 +199,34 @@ static bool ServeHttpGet(int fd, const char* target) {
       .topic_size = strlen(target) - 1,
   };
   struct Message** message = tfind(&key, &g_service.messages, MessageCompare);
-  if (!message) return SendHttpReply(fd, "404 NotFound", NULL, NULL, 0);
-  struct iovec body = {
-      .iov_base = (*message)->payload,
-      .iov_len = (*message)->payload_size,
-  };
-  return SendHttpReply(fd, "200 OK", "application/json", &body, 1);
+  if (message) {
+    struct iovec body = {
+        .iov_base = (*message)->payload,
+        .iov_len = (*message)->payload_size,
+    };
+    return SendHttpReply(fd, "200 OK", "application/json", &body, 1);
+  }
+
+  struct iovec* iov =
+      malloc((2 + g_service.messages_count * 5) * sizeof(struct iovec));
+  if (!iov) {
+    LOGW("Failed to allocate body chunks");
+    return SendHttpReply(fd, "500 Internal Server Error", NULL, NULL, 0);
+  }
+  g_twalk_closure.target = target + 1;
+  g_twalk_closure.target_size = strlen(target + 1);
+  g_twalk_closure.ptr = iov;
+  g_twalk_closure.ptr->iov_base =
+      "<!DOCTYPE html><html><head><title>"
+      "MQhTTp</title></head><body>";
+  g_twalk_closure.ptr++->iov_len = 61;
+  twalk(g_service.messages, GatherMessages);
+  g_twalk_closure.ptr->iov_base = "</body></html>";
+  g_twalk_closure.ptr++->iov_len = 14;
+  bool result = SendHttpReply(fd, "200 OK", "text/html; charset=UTF-8", iov,
+                              (size_t)(g_twalk_closure.ptr - iov));
+  free(iov);
+  return result;
 }
 
 static bool ServeHttpPost(int fd, const char* target, const void* content,
@@ -349,6 +400,7 @@ static void OnMqttPublish(void* user, const char* topic, size_t topic_size,
       goto delete_node;
     }
     *node = message;
+    g_service.messages_count++;
   }
   free((*node)->payload);
   (*node)->payload = payload_copy;
