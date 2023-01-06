@@ -18,6 +18,8 @@
 #include "http_utils.h"
 
 #include <errno.h>
+#include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "toolbox/utils.h"
@@ -75,8 +77,20 @@ bool SendHttpReply(int fd, const char* status, const char* content_type,
     content_length += chunks[i].iov_len;
   }
 
+  size_t iov_count = 5 + chunks_count;
+  if (content_length && content_type) iov_count += 2;
+  if (iov_count > INT_MAX) {
+    LOGW("Too many body chunks");
+    return false;
+  }
+
+  struct iovec* iov = malloc(iov_count * sizeof(struct iovec));
+  if (!iov) {
+    LOGW("Failed to copy chunks (%s)", strerror(errno));
+    return false;
+  }
+
   char buffer[24];
-  struct iovec iov[7 + chunks_count];
   struct iovec* ptr = iov;
   AppendIov(&ptr, part1, sizeof(part1));
   AppendIov(&ptr, status, strlen(status));
@@ -87,9 +101,8 @@ bool SendHttpReply(int fd, const char* status, const char* content_type,
     AppendIov(&ptr, content_type, strlen(content_type));
   }
   AppendIov(&ptr, part4, sizeof(part4));
-  for (size_t i = 0; i < chunks_count; i++) {
-    *ptr++ = *chunks++;
-  }
-
-  return SendAll(fd, iov, (int)(ptr - iov));
+  memcpy(ptr, chunks, chunks_count * sizeof(struct iovec));
+  bool result = SendAll(fd, iov, (int)iov_count);
+  free(iov);
+  return result;
 }
