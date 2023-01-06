@@ -29,8 +29,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
+#include "http_utils.h"
 #include "message.h"
 #include "toolbox/buffer.h"
 #include "toolbox/http_parser.h"
@@ -160,19 +162,34 @@ static void OnHttpFinished(void* user, size_t offset) {
   BufferDiscard(&client->http_buffer, offset);
 }
 
-static void ServeHttp(int fd, const char* method, const char* target,
-                      const void* content, size_t content_length) {
-  LOGD("%s %s {%.*s}", method, target, (int)content_length,
-       (const char*)content);
-  static const char hurr_durr[] =
-      "HTTP/1.1 200 OK\r\n"
-      "Content-Type: text/html; charset=UTF-8\r\n"
-      "Content-Length: 51\r\n"
-      "\r\n"
-      "<!DOCTYPE html>\n<html><body>"
-      "hurr-durr"
-      "</body></html>";
-  write(fd, hurr_durr, sizeof(hurr_durr) - 1);
+static bool ServeHttpGet(int fd, const char* target) {
+  if (!strcmp(target, "/favicon.ico"))
+    return SendHttpReply(fd, "404 Not Found", NULL, NULL, 0);
+  struct Message key = {
+      .topic = *(char**)(void*)&target + 1,
+      .topic_size = strlen(target) - 1,
+  };
+  struct Message** message = tfind(&key, &g_service.messages, MessageCompare);
+  if (!message) return SendHttpReply(fd, "404 NotFound", NULL, NULL, 0);
+  struct iovec body = {
+      .iov_base = (*message)->payload,
+      .iov_len = (*message)->payload_size,
+  };
+  return SendHttpReply(fd, "200 OK", "application/json", &body, 1);
+}
+
+static bool ServeHttpPost(int fd, const char* target, const void* content,
+                          size_t content_length) {
+  return false;
+}
+
+static bool DispatchHttpRequest(int fd, const char* method, const char* target,
+                                const void* content, size_t content_length) {
+  LOGD("%s %s %.*s", method, target, (int)content_length, (const char*)content);
+  if (!strcmp(method, "GET")) return ServeHttpGet(fd, target);
+  if (!strcmp(method, "POST"))
+    return ServeHttpPost(fd, target, content, content_length);
+  return SendHttpReply(fd, "405 Method Not Allowed", NULL, NULL, 0);
 }
 
 static void OnClientRead(void* user) {
@@ -195,8 +212,11 @@ static void OnClientRead(void* user) {
     if (!client->http_parser.stage) {
       if (client->content_length > client->http_buffer.size)
         goto want_more_data;
-      ServeHttp(client->sock, client->method, client->target,
-                client->http_buffer.data, client->content_length);
+      if (!DispatchHttpRequest(client->sock, client->method, client->target,
+                               client->http_buffer.data,
+                               client->content_length)) {
+        goto drop_client;
+      }
       HttpParserReset(&client->http_parser);
       BufferDiscard(&client->http_buffer, client->content_length);
       client->content_length = 0;
@@ -301,8 +321,9 @@ static void OnMqttPublish(void* user, const char* topic, size_t topic_size,
     LOGW("Failed to copy payload (%s)", strerror(errno));
     return;
   }
+  memcpy(payload_copy, payload, payload_size);
   struct Message key = {
-      .topic = *(void**)(void*)(&topic),
+      .topic = *(void**)(void*)&topic,
       .topic_size = topic_size,
   };
   struct Message** node = tsearch(&key, &g_service.messages, MessageCompare);
