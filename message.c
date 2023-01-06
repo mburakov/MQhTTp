@@ -17,14 +17,23 @@
 
 #include "message.h"
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "toolbox/utils.h"
+
 struct Message* MessageCreate(const char* topic, size_t topic_size) {
   struct Message* message = malloc(sizeof(struct Message));
-  if (!message) return NULL;
+  if (!message) {
+    LOGW("Failed to allocate message (%s)", strerror(errno));
+    return NULL;
+  }
   message->topic = malloc(topic_size);
-  if (!message->topic) goto free_message;
+  if (!message->topic) {
+    LOGW("Failed to copy topic (%s)", strerror(errno));
+    goto free_message;
+  }
   memcpy(message->topic, topic, topic_size);
   message->topic_size = topic_size;
   message->payload = NULL;
