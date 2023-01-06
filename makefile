@@ -13,6 +13,9 @@ obj+=\
 libs:=\
 	luajit
 
+CFLAGS+=\
+	-D_GNU_SOURCE
+
 CFLAGS+=$(shell pkg-config --cflags $(libs))
 LDFLAGS+=$(shell pkg-config --libs $(libs))
 
