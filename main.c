@@ -180,7 +180,18 @@ static bool ServeHttpGet(int fd, const char* target) {
 
 static bool ServeHttpPost(int fd, const char* target, const void* content,
                           size_t content_length) {
-  return false;
+  const char* topic = target + 1;
+  size_t topic_size = strlen(topic);
+  if (topic_size > UINT16_MAX) {
+    LOGW("Topic is too long to fit into mqtt message");
+    return SendHttpReply(fd, "414 URI Too Long", NULL, NULL, 0);
+  }
+  if (!MqttPublish(g_service.mqtt, topic, (uint16_t)topic_size, content,
+                   content_length)) {
+    LOGW("Failed to publish mqtt message (%s)", strerror(errno));
+    return SendHttpReply(fd, "500 Internal Server Error", NULL, NULL, 0);
+  }
+  return SendHttpReply(fd, "200 OK", NULL, NULL, 0);
 }
 
 static bool DispatchHttpRequest(int fd, const char* method, const char* target,
