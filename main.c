@@ -408,8 +408,8 @@ static void OnMqttSubscribeAck(void* user, bool success) {
 
   g_service.lua_state = luaL_newstate();
   if (!g_service.lua_state) {
-    LOGW("Failed to allocate lua state (%s)", strerror(errno));
-    OnSignal(SIGTERM);
+    LOGE("Failed to allocate lua state (%s)", strerror(errno));
+    OnSignal(SIGABRT);
     return;
   }
 
@@ -421,8 +421,8 @@ static void OnMqttSubscribeAck(void* user, bool success) {
 
   DIR* current_dir = opendir(".");
   if (!current_dir) {
-    LOGW("Failed to open current dir (%s)", strerror(errno));
-    OnSignal(SIGTERM);
+    LOGE("Failed to open current dir (%s)", strerror(errno));
+    OnSignal(SIGABRT);
     return;
   }
   for (struct dirent* item; (item = readdir(current_dir));) {
