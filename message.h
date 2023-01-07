@@ -25,6 +25,7 @@ struct Message {
   size_t topic_size;
   void* payload;
   size_t payload_size;
+  int lua_callback;
 };
 
 struct Message* MessageCreate(const char* topic, size_t topic_size);

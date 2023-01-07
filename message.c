@@ -18,6 +18,7 @@
 #include "message.h"
 
 #include <errno.h>
+#include <lauxlib.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -38,6 +39,7 @@ struct Message* MessageCreate(const char* topic, size_t topic_size) {
   message->topic_size = topic_size;
   message->payload = NULL;
   message->payload_size = 0;
+  message->lua_callback = LUA_REFNIL;
   return message;
 
 free_message:
