@@ -4,7 +4,7 @@ This is a lightweight lua-scriptable http gateway to mosquitto.
 
 ## Building on Linux
 
-MQhTTp depends on libmosquitto and luajit. Once you have these installed, just
+The only dependency of MQhTTp is luajit (regular lua would also work). Once you have it installed, just
 ```
 make
 ```
@@ -89,3 +89,7 @@ MQhTTp would publish to mosquitto anything that arrives as an HTTP POST request 
 ## Bugs
 
 Yes.
+
+## Where is toolbox?
+
+Note, that I don't use github for actual development anymore - it's just a mirror these days. Instead, I self-host git repos on https://burakov.eu. Read-only access is provided via cgit, i.e.: https://burakov.eu/mqhttp.git. Same stands for toolbox submodule, which is fetched via https using git commandline. You can as well access the code of toolbox directly using your browser: https://burakov.eu/toolbox.git.
