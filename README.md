@@ -17,7 +17,7 @@ I don't care about any other platforms except Linux, so you are on your own.
 
 Provide host and port of your mosquitto server on the commandline, i.e.
 ```
-./mqhttp localhost 1883
+./mqhttp 127.0.0.1 1883
 ```
 
 After starting, HTTP server listens for incoming connections on localhost, port 8080.
